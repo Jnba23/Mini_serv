@@ -57,7 +57,7 @@ char *str_join(char *buf, char *add)
 
 void welcome_msg(clt_t* clt, int fd, fd_set* master_set, int nfds){
     char s[37];
-    bzero(s);
+    memset(s, 0, sizeof(s));
     sprintf(s, "server: client %d just arrived\n", clt->id);
     for (int i = 0; i < nfds; i++){
         if (FD_ISSET(i, master_set) && i != fd){
@@ -77,6 +77,7 @@ int handle_new_connection(clt_t* clt, int fd, fd_set* master_set, int* nfds){
     if (new_cfd == -1)
         return (-1);
     clt->fd = new_cfd;
+    clt->recv_buff = NULL;
     welcome_msg(clt, fd, master_set, *nfds);
     FD_SET(new_cfd, master_set);
     if (new_cfd + 1 > *nfds)
@@ -85,9 +86,12 @@ int handle_new_connection(clt_t* clt, int fd, fd_set* master_set, int* nfds){
 }
 
 void broadcast_message(char* msg, int fd, clt_t* clt, fd_set* master_set, int nfds){
+    fprintf(stderr, "clt fd : %d\n", clt->fd);
     for(int i = 0; i < nfds; i++){
-        if (FD_ISSET(clt->fd, master_set) && clt->fd != fd){
-            if (send(clt->id, msg, strlen(msg), 0) == -1){
+        if (FD_ISSET(i, master_set) && i != fd && i != clt->fd){
+            if (send(i, msg, strlen(msg), 0) == -1){
+                fprintf(stderr, "errno : %d\n", errno);
+                fprintf(stderr, "invalid fd : %d\n", i);
                 continue ;
             }
         }
@@ -96,8 +100,9 @@ void broadcast_message(char* msg, int fd, clt_t* clt, fd_set* master_set, int nf
 
 void clt_disconnect(clt_t* clt, int fd, fd_set* master_set, int nfds){
     FD_CLR(clt->fd, master_set);
+    close(clt->fd);
     char s[34];
-    bzero(s, '\0');
+    memset(s, 0, sizeof(s));
     sprintf(s, "server: client %d just left\n", clt->id);
     for(int i = 0; i < nfds; i++){
         if (FD_ISSET(i, master_set) && i != fd){
@@ -106,40 +111,37 @@ void clt_disconnect(clt_t* clt, int fd, fd_set* master_set, int nfds){
             }
         }
     }
-    close(clt->fd);
 }
 
 void handle_clients_requests(clt_t* clt, int fd, fd_set* master_set, int nfds){
-    char buff[1024];
+    char *buff = malloc(sizeof(char) * 1024);
+    if (!buff){
+        print("Fatal error");
+        exit(1);
+    }
     char* msg = NULL;
     char prefix[14];
     int bytes_rcvd;
     sprintf(prefix, "client %d: ", clt->id);
-    bzero(buff);
-    if ((bytes_rcvd = recv(clt->fd, buff, sizeof(buff), 0)) == -1)
+    if ((bytes_rcvd = recv(clt->fd, buff, sizeof(buff) - 1, 0)) == -1){
+        if (errno == EBADF){
+            FD_CLR(clt->fd, master_set);
+            close(clt->fd);
+        }
         return ;
+    }
     if (bytes_rcvd == 0){
         clt_disconnect(clt, fd, master_set, nfds);
         return ;
     } else {
-        while (strlen(buff)){
-            char* add;
-            if (strstr(buff, "\n")){
-                extract_message(&buff, &msg);
-                broadcast_message(prefix, fd, clt, master_set, nfds);
-                broadcast_message(msg, fd, clt, master_set, nfds);
-                add = calloc(1 ,sizeof(char) * (strlen(buff) + 1));
-                if (!add){
-                    print("Fatal error");
-                    exit(1);
-                }
-                strcpy(add, buff);
-                bzero(buff);
-            } else {
-                str_join(add, buff);
-                free(add);
-            }
+        buff[bytes_rcvd] = '\0';
+        clt->recv_buff = str_join(clt->recv_buff, buff);
+        while (extract_message(&clt->recv_buff, &msg)){
+            broadcast_message(prefix, fd, clt, master_set, nfds);
+            broadcast_message(msg, fd, clt, master_set, nfds);
+            free(msg);
         }
+
     }
 }
 
@@ -147,24 +149,25 @@ int server_socket(int port){
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     if (inet_pton(AF_INET, "127.0.0.1", &(addr.sin_addr)) == -1){
-        print("Fatal error");
+        print("inet_pton Fatal error");
         exit(1);
     }
     addr.sin_port = htons(port);
     memset(addr.sin_zero, 0, sizeof(addr.sin_zero));
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == -1){
-        print("Fatal error");
+        print("socket Fatal error");
         exit(1);
     }
+    fcntl(fd, F_SETFD, O_NONBLOCK);
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     if (bind(fd, (SOCKADDR *)&addr, sizeof(addr)) == -1){
-        print("hereFatal error");
+        print("bind Fatal error");
         exit(1);
     }
     if (listen(fd, BACKLOG) == -1){
-        print("Fatal error");
+        print("listen Fatal error");
         exit(1);
     }
     return (fd);
@@ -181,6 +184,7 @@ int main(int ac, char** av){
             exit(1);
         }
         int fd = server_socket(port);
+        fprintf(stderr, "server fd : %d\n", fd);
         fd_set master_set;
         fd_set rd_fds;
 
@@ -194,13 +198,15 @@ int main(int ac, char** av){
         int clt_idx = 0;
         while (1){
             rd_fds = master_set;
-            for (int i = 0; i < nfds; i++){
-                if (select(nfds, &rd_fds, NULL, NULL, 0) == -1){
-                    print("Fatal error");
+            if (select(nfds, &rd_fds, NULL, NULL, 0) == -1){
+                if (errno == EINVAL){
+                    print("Select Fatal error");
                     exit(1);
                 }
+                continue ;
+            }
+            for (int i = 0; i < nfds; i++){
                 if (FD_ISSET(i, &rd_fds)){
-                    int idx = fd_to_idx[i];
                     if (i == fd){
                         clts[clt_idx].id = clt_idx;
                         int x = handle_new_connection(clts + clt_idx, fd, &master_set, &nfds);
@@ -215,4 +221,4 @@ int main(int ac, char** av){
         }
     }
     return (0);
-}
+} 

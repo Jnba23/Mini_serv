@@ -18,10 +18,10 @@ int main(){
         perror("error");
         exit(1);
     }
-    if (send(s_fd, "heeeey hello", strlen("heeeey hello"), 0) == -1){
-        perror("error");
-        exit(1);
-    }
-    fprintf(stdout, "Client connected succesfully !\n");
-    close(s_fd);
+    // if (send(s_fd, "heeeey hello", strlen("heeeey hello"), 0) == -1){
+    //     perror("error");
+    //     exit(1);
+    // }
+    // fprintf(stdout, "Client connected succesfully !\n");
+    // close(s_fd);
 }

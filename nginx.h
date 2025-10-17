@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netdb.h>
+#include <strings.h>
 #include <string.h>
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -19,5 +20,6 @@ typedef struct sockaddr SOCKADDR;
 typedef struct clt {
     int id;
     int fd;
+    char* recv_buff;    
 } clt_t;
 #endif
